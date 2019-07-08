@@ -19,7 +19,6 @@
 #define SSID 		"ESP32"
 #define PASSWORD	"121235RA"
 #define PORT 		8080
-#define HOST_IP_ADDR 				"192.168.4.1"
 
 #define SAMPLE_RATE 8000
 #define BUFFER_MAX  2000
@@ -28,11 +27,8 @@ size_t i2s_bytes_write = 0;
 
 int16_t buffer[BUFFER_MAX];
 
+
 static EventGroupHandle_t s_wifi_event_group;
-
-const int WIFI_CONNECTED_BIT = BIT0;
-
-static int s_retry_num = 0;
 
 
 static void recv_all(int sock, void *vbuf, size_t size_buf)
@@ -67,26 +63,35 @@ static void recv_all(int sock, void *vbuf, size_t size_buf)
 
 static void tcp_server_task(void *pvParameters)
 {
+    char addr_str[128];
     int addr_family;
     int ip_protocol;
 
-    while(1){
-        struct sockaddr_in destAddr;
-        destAddr.sin_addr.s_addr = inet_addr(HOST_IP_ADDR);
+    	struct sockaddr_in destAddr;
+    	destAddr.sin_addr.s_addr = htonl(INADDR_ANY);
         destAddr.sin_family = AF_INET;
         destAddr.sin_port = htons(PORT);
         addr_family = AF_INET;
         ip_protocol = IPPROTO_IP;
+        inet_ntoa_r(destAddr.sin_addr, addr_str, sizeof(addr_str) - 1);
 
-        int sock = socket(addr_family, SOCK_STREAM, ip_protocol);
-   		connect(sock, (struct sockaddr *)&destAddr, sizeof(destAddr));
+        int listen_sock = socket(addr_family,SOCK_STREAM, ip_protocol);
 
-   		recv_all(sock,(void*)&buffer, sizeof(int16_t)*BUFFER_MAX);
+        bind(listen_sock, (struct sockaddr *)&destAddr, sizeof(destAddr));
 
-   		shutdown(sock, 0);
-        close(sock);
-        vTaskDelete(NULL);
-    }
+        listen(listen_sock, 1);
+
+        struct sockaddr_in6 sourceAddr; // Large enough for both IPv4 or IPv6
+        uint addrLen = sizeof(sourceAddr);
+
+       while(1){
+    	   int sock = accept(listen_sock, (struct sockaddr *)&sourceAddr, &addrLen);
+
+    	   recv_all(sock,(void*)&buffer, sizeof(int16_t)*BUFFER_MAX);
+    	   shutdown(sock, 0);
+    	   close(sock);
+    	   vTaskDelay(10/portTICK_PERIOD_MS);
+       }
 
 }
 
@@ -94,28 +99,13 @@ static void tcp_server_task(void *pvParameters)
 static esp_err_t event_handler(void *ctx, system_event_t *event){
 
 	switch(event->event_id){
-    case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
+	case SYSTEM_EVENT_AP_STACONNECTED:
+		gpio_set_level(GPIO_NUM_2, 1);
+		xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL,0);
+		break;
+    case SYSTEM_EVENT_AP_STADISCONNECTED:
+		gpio_set_level(GPIO_NUM_2, 0);
         break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        gpio_set_level(GPIO_NUM_2, 1);
-        xTaskCreatePinnedToCore(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL,0);
-        break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-        {
-        	gpio_set_level(GPIO_NUM_2, 0);
-            if (s_retry_num < 3) {
-                esp_wifi_connect();
-                xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-                s_retry_num++;
-
-            }
-
-            break;
-        }
-
     default:
     	break;
 	}
@@ -132,15 +122,18 @@ static void setup_wifi(){
 	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 	wifi_config_t wifi_config = {
-			.sta = {
+			.ap = {
 					.ssid = SSID,
+					.ssid_len = strlen(SSID),
 					.password = PASSWORD,
+					.max_connection = 4,
+					.authmode = WIFI_AUTH_WPA_WPA2_PSK
 			},
 	};
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
-    ESP_ERROR_CHECK(esp_wifi_start() );
+	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP,&wifi_config));
+	ESP_ERROR_CHECK(esp_wifi_start());
 
 }
 
@@ -162,8 +155,8 @@ void app_main(void)
     };
     i2s_pin_config_t pin_config = {
         .bck_io_num = 33,
-        .ws_io_num = 13,
-        .data_out_num = 32,
+        .ws_io_num = 25,
+        .data_out_num = 26,
         .data_in_num = -1                                                       //não utilizado
     };
     i2s_driver_install(0, &i2s_config, 0, NULL);
